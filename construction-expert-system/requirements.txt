@@ -51,3 +51,5 @@ urllib3==2.5.0
 watchdog==6.0.0
 wrapt==1.17.3
 yarl==1.22.0
+openpyxl==3.1.5
+openpyxl
