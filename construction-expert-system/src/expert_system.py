@@ -11,7 +11,7 @@ from referencing.exceptions import NoInternalID
 # ============================
 # PATHS (Stable Absolute Paths)
 # ============================
-
+BRICK_MASTER_V1_1_PATH = "../dataset/brick_master_v1_1.xlsx"
 SRC_DIR = Path(__file__).resolve().parent         # .../construction-expert-system/src
 PROJECT_DIR = SRC_DIR.parent                      # .../construction-expert-system
 DATASET_DIR = PROJECT_DIR / "dataset"             # .../construction-expert-system/dataset
@@ -286,6 +286,7 @@ def load_all_datasets():
     datasets["waterproofing_df"]      = load_excel_with_cache(WATERPROOFING_MATERIALS_PATH)
     datasets["roofing_materials_df"]  = load_excel_with_cache(ROOFING_MATERIALS_PATH)
     datasets["flooring_materials_df"] = load_excel_with_cache(FLOORING_MATERIALS_PATH)
+    datasets["brick_master_df"]       = load_excel_with_cache(BRICK_MASTER_V1_1_PATH)
 
     return datasets
 
@@ -457,7 +458,92 @@ def filter_rules(
         data = data[data[col].apply(lambda x: norm(x) == tnorm)]
     return data
 
+from typing import Tuple, List
 
+# ============================
+# Foundation Mapping (Spec v1.0)
+# ============================
+
+def map_floors_to_demand_class(floors: int) -> str:
+    # 1–2 Low, 3–6 Medium, >6 High
+    if floors <= 2:
+        return "Low"
+    if 3 <= floors <= 6:
+        return "Medium"
+    return "High"
+
+def map_qallow_to_soil_class(q_allow_kpa: float) -> str:
+    # <100 Weak, 100–200 Medium, >200 Strong
+    if q_allow_kpa < 100:
+        return "Weak"
+    if 100 <= q_allow_kpa <= 200:
+        return "Medium"
+    return "Strong"
+
+def map_gwt_to_water_risk(gwt_m: float, basement: bool, water_head_m: float | None) -> str:
+    # GWT <1 High, 1–3 Medium, >3 Low
+    if gwt_m < 1.0:
+        base = "High"
+    elif 1.0 <= gwt_m <= 3.0:
+        base = "Medium"
+    else:
+        base = "Low"
+
+    # Basement + head >=2m => raise one level
+    if basement and water_head_m is not None and water_head_m >= 2.0:
+        if base == "Low":
+            return "Medium"
+        if base == "Medium":
+            return "High"
+    return base
+
+
+# ============================
+# Sufficiency + Consistency (Spec v1.0)
+# ============================
+
+def foundation_check_v1(
+    foundation_type: str,
+    floors: int,
+    q_allow_kpa: float,
+    gwt_m: float,
+    basement: bool,
+    water_head_m: float | None,
+    exposure: str,
+    design_life: int
+) -> Tuple[str, List[str], List[str]]:
+    """
+    Returns:
+      confidence: HIGH/MEDIUM/LOW
+      warnings: list[str]
+      recommendations: list[str]
+    """
+    warnings: List[str] = []
+    recs: List[str] = []
+
+    # --- Sufficiency (enforced by caller UI; we still guard here)
+    if floors is None or q_allow_kpa is None or gwt_m is None or not exposure or not design_life:
+        return "LOW", ["Missing essential inputs."], []
+
+    if basement and water_head_m is None:
+        return "LOW", ["Basement selected but Water Head is missing."], []
+
+    # --- Consistency rules (agreed thresholds)
+    if foundation_type == "Isolated" and floors > 10:
+        warnings.append("Isolated Footings with Floors > 10 may be unsafe/uneconomical. Review structural design.")
+
+    if q_allow_kpa < 100 and floors > 5:
+        recs.append("Low bearing capacity (<100 kPa) with Floors > 5: consider Raft or Piles.")
+
+    if gwt_m < 1.0:
+        recs.append("High groundwater (GWT < 1.0 m): dewatering during construction + stronger waterproofing recommended.")
+
+    if norm(exposure) in ["marine", "marine-chloride", "chloride", "xs", "xd"]:
+        recs.append("Marine/Chloride exposure: epoxy-coated rebar + SCM (silica fume/fly ash) + low-permeability concrete recommended.")
+
+    # Confidence: HIGH if sufficient, MEDIUM if warnings exist
+    conf = "MEDIUM" if warnings else "HIGH"
+    return conf, warnings, recs
 # ============================
 #  Stage 3: Scoring rules (Foundations)
 # ============================
@@ -473,8 +559,8 @@ def score_foundation_rule(row: pd.Series, criteria: Dict[str, Any]) -> float:
     ts = SEISMIC_ORDER.get(target_seis, 0)
     rs = SEISMIC_ORDER.get(rule_seis, 0)
     if rs < ts:
-        return -1e9  # مرفوض (أقل من المطلوب)
-    score += (rs - ts) * 2.0  # كلما كان أعلى قليلاً يزيد الأمان
+        return -1e9
+    score += (rs - ts) * 2.0
 
     # Aggressiveness / Sulfate
     target_ag = norm(criteria.get("Aggressiveness_Class", "normal"))
@@ -485,21 +571,21 @@ def score_foundation_rule(row: pd.Series, criteria: Dict[str, Any]) -> float:
         return -1e9
     score += (ra - ta) * 2.0
 
-    # 2) Bearing capacity تقريبية (كلما اقتربت من المطلوب كان أفضل)
+
     target_bc = try_float(criteria.get("Bearing_Capacity_kPa", 0.0))
     rule_bc   = try_float(row.get("Bearing_Capacity_kPa", 0.0))
     if target_bc > 0:
         diff = abs(rule_bc - target_bc)
-        score -= diff / 50.0  # penalty بسيطة
+        score -= diff / 50.0
 
     # 3) Min concrete strength
     min_fc = try_float(row.get("Min_Concrete_Strength_MPa", 20.0))
     req_fc = try_float(criteria.get("Min_Concrete_Strength_MPa", 20.0))
     if req_fc > 0 and min_fc < req_fc:
         return -1e9
-    score += (min_fc - req_fc) * 0.5  # زيادة بسيطة ليست مشكلة
+    score += (min_fc - req_fc) * 0.5
 
-    # 4) Cost level (كلما كان أقل أفضل)
+
     cost = norm(row.get("Cost_Level", "medium"))
     if cost == "low":
         score += 3
@@ -508,7 +594,7 @@ def score_foundation_rule(row: pd.Series, criteria: Dict[str, Any]) -> float:
     elif cost == "high":
         score -= 1
 
-    # 5) Importance_Level يمكن أن نكافئ "Very_High"
+
     imp = norm(row.get("Importance_Level", "normal"))
     if "very_high" in imp:
         score += 2
@@ -580,7 +666,7 @@ def find_best_foundation_rule_safe(
         s2 = s2.sort_values("tmp_score", ascending=False)
         return s2.iloc[0]
 
-    # ---- Stage 3: Scoring على كل الجدول مع ضمان السلامة
+
     scores = []
     for _, row in found_df.iterrows():
         sc = score_foundation_rule(row, crit)
@@ -594,6 +680,116 @@ def find_best_foundation_rule_safe(
 
     found_df = found_df.sort_values("score_tmp", ascending=False)
     return found_df.iloc[0]
+
+
+def find_best_foundation_rule_safe_v2(
+    found_df: pd.DataFrame,
+    project_type: str,
+    struct_system: str,
+    foundation_type: str,
+
+    # ✅ Soil type الحقيقي (A)
+    soil_type: str,   # Clay / Sand / Mixed / Fill ... (حسب الداتا)
+
+    floors: int,
+    q_allow_kpa: float,
+    gwt_m: float,
+    basement: bool,
+    water_head_m: float | None,
+
+    exposure: str,         # Normal / Sulfate / Marine-Chloride / Industrial
+    design_life: int,      # 50 / 100
+
+    seismic: str = "low",
+    exc_risk: str = "low",
+    aggressiveness: str = "normal",
+    min_fc_req: float = 0.0
+):
+    """
+    v2: numeric UI + mapping + checks
+    Returns: (best_rule, meta)
+    """
+
+    if found_df is None or len(found_df) == 0:
+        return None, {"confidence": "LOW", "warnings": ["No foundation rules dataset loaded."], "recommendations": []}
+
+    # --- Derive aggressiveness from exposure if not explicitly set
+    exp_n = norm(exposure)
+    if aggressiveness == "normal":
+        if "sulf" in exp_n:
+            aggressiveness = "sulfate"
+        elif "marine" in exp_n or "chlor" in exp_n:
+            aggressiveness = "marine"
+        elif "industrial" in exp_n or "chem" in exp_n:
+            aggressiveness = "industrial"
+        else:
+            aggressiveness = "normal"
+
+    # --- Mapping (Spec v1.0)  (هذا داخلي فقط)
+    demand_class = map_floors_to_demand_class(int(floors))
+    soil_class   = map_qallow_to_soil_class(float(q_allow_kpa))
+    water_risk   = map_gwt_to_water_risk(float(gwt_m), bool(basement), (float(water_head_m) if water_head_m is not None else None))
+
+    # ✅ تحويل Water_Risk إلى نفس صيغة الداتا (low/medium/high)
+    water_risk_norm = norm(water_risk)  # "low/medium/high"
+    if water_risk_norm not in ["low", "medium", "high"]:
+        # fallback
+        water_risk_norm = "medium"
+
+    # --- Checks (Spec v1.0)
+    conf, warns, recs = foundation_check_v1(
+        foundation_type=foundation_type,
+        floors=int(floors),
+        q_allow_kpa=float(q_allow_kpa),
+        gwt_m=float(gwt_m),
+        basement=bool(basement),
+        water_head_m=(float(water_head_m) if water_head_m is not None else None),
+        exposure=exposure,
+        design_life=int(design_life),
+    )
+
+    meta = {
+        "confidence": conf,
+        "warnings": warns,
+        "recommendations": recs,
+        "mapped": {
+            "Demand_Class": demand_class,
+            "Soil_Class": soil_class,          # داخلي فقط
+            "Water_Risk": water_risk_norm,     # سنستخدمه كـ Groundwater_Level
+            "Aggressiveness_Class": aggressiveness,
+        }
+    }
+
+    # ✅ criteria مطابق لأعمدة الداتا الحالية
+    # Soil_Type يبقى نوع التربة الحقيقي (A)
+    crit = {
+        "Project_Type": project_type,
+        "Structural_System": struct_system,
+        "Soil_Type": soil_type,
+        "Groundwater_Level": water_risk_norm,      # low/medium/high
+        "Seismic_Zone_Level": seismic,
+        "Excavation_Risk_Level": exc_risk,
+        "Aggressiveness_Class": aggressiveness,
+        "Min_Concrete_Strength_MPa": float(min_fc_req or 0.0),
+
+        # هذا للـ scoring (عندك Bearing_Capacity_kPa في score_foundation_rule)
+        "Bearing_Capacity_kPa": float(q_allow_kpa),
+    }
+
+    # ✅ استدعاء محركك القديم بدون كسر
+    best = find_best_foundation_rule_safe(
+        found_df=found_df,
+        project_type=crit["Project_Type"],
+        struct_system=crit["Structural_System"],
+        soil=crit["Soil_Type"],
+        gwt=crit["Groundwater_Level"],
+        seismic=crit["Seismic_Zone_Level"],
+        exc_risk=crit["Excavation_Risk_Level"],
+        aggressiveness=crit["Aggressiveness_Class"],
+        min_fc_req=crit["Min_Concrete_Strength_MPa"],
+    )
+
+    return best, meta
 
 # ============================
 #  MATERIAL SELECTION (Concrete / Rebar / WP)
@@ -671,9 +867,9 @@ def select_concrete_for_rule(
         # كل ما قربت من f'c المفضل كان أفضل
         s -= abs(fc - pref_fc) * 0.2  # تقريبا كل 5 MPa فرق تعطي -1
 
-        # مطابقة التعرض
-        rk = rule_exp_key  # مثل XC2 أو XS3
-        ck = r.get("exp_key", "")  # مثل XC2 أو XC1
+
+        rk = rule_exp_key
+        ck = r.get("exp_key", "")
 
         if not rk:
             # ما عندي معلومات تعرض في القاعدة، ما أقيّم
@@ -4408,6 +4604,7 @@ HOSPITAL_POLICIES = {
         },
     }
 }
+
 
 
 def _text_contains_any(value: str, keywords: list) -> bool:

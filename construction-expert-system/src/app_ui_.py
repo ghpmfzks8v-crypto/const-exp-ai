@@ -11,6 +11,19 @@ import pandas as pd
 # Streamlit
 # =========================
 import streamlit as st
+st.markdown("""
+<style>
+/* أخفي القائمة والفوتر فقط */
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+
+/* أخفي علامة Streamlit أسفل */
+div[data-testid="stDecoration"] {display:none !important;}
+
+/* لا نخفي stToolbar حتى لا يختفي زر فتح السايدبار */
+</style>
+""", unsafe_allow_html=True)
+
 
 # =========================
 # Project imports
@@ -5181,7 +5194,9 @@ def main():
     st.set_page_config(
         page_title="Construction Material Expert System",
         layout="wide",
+        initial_sidebar_state="expanded"
     )
+
 
     # ✅ 1) Theme first
     apply_deep_oceanic_theme()

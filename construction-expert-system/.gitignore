@@ -1,0 +1,16 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+.vscode/
+
+# Secrets / local keys
+adbkey
+adbkey.pub
+
+# OS
+.DS_Store
+Thumbs.db
