@@ -1,16 +1,36 @@
 # Python
-.venv/
 __pycache__/
+*.py[cod]
+*.pyo
+*.pyd
 *.pyc
+
+# Virtual env
+.venv/
+venv/
 
 # IDE
 .idea/
 .vscode/
 
-# Secrets / local keys
-adbkey
-adbkey.pub
-
 # OS
 .DS_Store
 Thumbs.db
+
+# Secrets / keys
+adbkey
+adbkey.pub
+
+# Local outputs
+output/
+dataset_cache/
+*.pkl
+
+# Excel generated locally (اختياري - إذا ما تريد ترفع الداتا)
+dataset/brick_master_v1_1.xlsx
+
+# Streamlit
+.streamlit/
+
+# Node / misc
+node_modules/
